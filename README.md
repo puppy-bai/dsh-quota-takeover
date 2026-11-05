@@ -5,8 +5,9 @@
 > 全都没有就换下一档模型再遍历一遍；实在不行用你指定的兜底模型。
 > 任务因额度中断时，自动切到新平台并往中断的会话里发一条「继续」。
 
-设计文档（含需求分析、失败分类表、风险对策、分期计划）：
-[`docs/quota-takeover-plugin-design.md`](../../docs/quota-takeover-plugin-design.md)
+设计文档（含需求分析、失败分类表、风险对策、能力边界、终局兜底）：
+[`docs/quota-takeover-plugin-design.md`](docs/quota-takeover-plugin-design.md)
+上架市场的步骤：[`docs/SUBMISSION.md`](docs/SUBMISSION.md)
 
 ## 它做什么
 
@@ -34,12 +35,38 @@ OFM 的 API 挂在 harness 的信任围栏后，插件进程内的 `fetch` 一�
 所以读账号/额度、写 combos 这两件事只能由浏览器半身代劳；**续跑不受影响**——它是进程内
 `agent.followup()`，不经过 HTTP。
 
-## 装在哪
+## 安装
 
-- 源码：本仓库（`quota-takeover/`）
-- 运行位置：`~/.dsh/profiles/desktop/node_modules/dsh-quota-takeover`
-- 已在 `~/.dsh/profiles/desktop/package.json` 的 `dsh.profile.bundles` 中登记
-- 运行期数据：`~/.dsh/quota-takeover/{config,plan,bench,resume}.json` + `journal.jsonl`
+**前提**：先装好 [Our Free Model](https://github.com/Ebony-Vinyl/dsh-our-free-model)。本插件从它那里取「平台 × 模型 × 剩余额度」，并把接力链写回它的 combos；没有 OFM 时只剩续跑能力，没有可接力的平台。
+
+从市场装（发布后可用）：
+
+```
+DSH → Plugins → Discover 里搜 quota-takeover
+```
+
+手动装（开发/未发布时）：
+
+```bash
+cd ~/.dsh/profiles/desktop
+npm i /path/to/dsh-quota-takeover-0.1.0.tgz   # 或把源码目录拷到 node_modules/dsh-quota-takeover
+
+# 然后在 package.json 的 dsh.profile.bundles 数组里追加 "dsh-quota-takeover"
+# 被 bundles 引用的包，其自带 cordis.patch.yml 自动生效；
+# 别再往 cordis.patch.yml 手写同名条目，否则报 duplicate loader entry id
+```
+
+最后**完全退出 DeepSeek Harness 再打开**——host 半身只在进程启动时 `apply` 一次，刷新页面只重载浏览器半身。
+
+装好后的三个检查点：
+
+| 检查点 | 期望 |
+| --- | --- |
+| 设置 → 「额度接力」 | 页面出现，且没有红色「宿主半身没有加载」告警 |
+| 平台顺序 / 模型档 | 列出 channel-pack 里启用的平台与它们的真实模型 |
+| `~/.dsh/quota-takeover/journal.jsonl` | 有 `api-mounted`；发生过失败时有 `failure` / `resume` |
+
+运行期数据：`~/.dsh/quota-takeover/{config,plan,bench,resume}.json` + `journal.jsonl`
 
 ## 配置
 

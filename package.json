@@ -24,7 +24,8 @@
     "tests/",
     "cordis.patch.yml",
     "locale/",
-    "LICENSE"
+    "LICENSE",
+    "docs/"
   ],
   "keywords": [
     "dsh",
