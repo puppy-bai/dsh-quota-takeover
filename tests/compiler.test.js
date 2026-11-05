@@ -210,3 +210,22 @@ test('写回不重复：与「上次真正写进 OFM 的内容」相同就不再
   await compiler.replan({ reason: 'snapshot' })
   assert.equal(pending.length, 1, '内容没变就不该重写')
 })
+
+test('聚合渠道：别名按最后一段匹配（siliconflow/deepseek-ai/DeepSeek-V3 ← DeepSeek-V3）', async () => {
+  const accounts = [
+    { id: 'aggregate:siliconflow', provider: 'siliconflow', enabled: true, kind: 'aggregate',
+      models: ['siliconflow/deepseek-ai/DeepSeek-V3', 'siliconflow/Qwen/Qwen3-32B'] },
+  ]
+  const base = makeCfg()
+  const cfg = mergeConfig(base, {
+    modelTiers: [{ id: 'v3', label: 'V3', pinned: false, aliases: ['DeepSeek-V3'] }],
+    finalResort: { official: { enabled: false }, fallbackModels: [] },
+  })
+  const compiler = createCompiler({
+    logger: { warn() {} }, cfg: () => cfg, ofm: {}, bridge: null,
+    bench: { get: () => ({}), edit: () => ({}), update() {} },
+    stores: { plan: { update() {}, get: () => ({}) } }, journal() {},
+  })
+  const plan = compiler.buildChain(cfg, accounts, {})
+  assert.deepEqual(plan.chain.map((c) => c.resolved), ['siliconflow/deepseek-ai/DeepSeek-V3'])
+})

@@ -120,6 +120,56 @@ window.__ModuleLoader__.load({
       return { accounts, models, platforms }
     }
 
+    /**
+     * 聚合渠道（自带 API key 的 provider，例如硅基流动）：来自 OFM 的 `/providers`。
+     * 这些平台不在 channel-pack 的账号池里，`provider.status` 永远看不到，所以单独读一次。
+     * 模型表从 catalog 行里按 `<providerId>/` 前缀切出来，账号用合成 id `aggregate:<pid>`。
+     */
+    async function readAggregate(catalog) {
+      const out = { accounts: [], models: [], platforms: [] }
+      let payload = null
+      try { payload = await json(`${OFM}/providers`) } catch { return out }
+      const configured = payload?.configured ?? {}
+      const registry = payload?.registry
+      const regRows = Array.isArray(registry) ? registry : Object.values(registry ?? {})
+      const label = new Map()
+      for (const row of regRows) if (row?.id) label.set(row.id, row.name ?? row.id)
+      const owned = new Set()
+      for (const pid of Object.keys(configured ?? {})) {
+        if (!pid) continue
+        const cfg = configured[pid] ?? {}
+        const prefix = `${pid}/`
+        const rows = (Array.isArray(catalog) ? catalog : [])
+          .filter((m) => typeof m?.id === 'string' && m.id.startsWith(prefix))
+        for (const m of rows) {
+          if (owned.has(m.id)) continue
+          owned.add(m.id)
+          out.models.push({ id: m.id, provider: pid, name: m.name ?? m.id })
+        }
+        // 模型清单还没探到时不要合成账号，否则每个档都会变成 unverified 候选
+        if (rows.length > 0) {
+          out.accounts.push({
+            id: `aggregate:${pid}`,
+            provider: pid,
+            nickname: label.get(pid) ?? pid,
+            enabled: cfg?.enabled !== false,
+            models: rows.map((m) => m.id),
+            kind: 'aggregate',
+          })
+        }
+        out.platforms.push({
+          provider: pid,
+          label: label.get(pid) ?? pid,
+          accounts: 1,
+          models: rows.length,
+          enabled: cfg?.enabled === false ? 0 : 1,
+          closed: false,
+          kind: 'aggregate',
+        })
+      }
+      return out
+    }
+
     /** 一轮完整同步：读 → 交快照 → 取待写 → 写 → 回报。 */
     async function syncOnce(report, transport) {
       const step = (name, state) => report?.({ step: name, state, at: Date.now() })
@@ -139,6 +189,18 @@ window.__ModuleLoader__.load({
             step('read', `RPC 失败：${String(error?.message ?? error).slice(0, 80)}`)
           }
         }
+        // 聚合渠道（硅基流动等自带 key 的平台）不在账号池里，单独并进来。
+        try {
+          const agg = await readAggregate(catalog)
+          if (agg.accounts.length > 0) {
+            grid = {
+              accounts: [...grid.accounts, ...agg.accounts],
+              models: [...grid.models, ...agg.models],
+              platforms: [...grid.platforms, ...agg.platforms],
+            }
+            accounts = grid.accounts
+          }
+        } catch { /* 聚合渠道读不到不影响主流程 */ }
         if (accounts.length === 0) {
           // 退化路径 1：OFM 的 /subscriptions（订阅型账号；channel-pack 账号读不到时用它兜底）
           const subs = await json(`${OFM}/subscriptions`).catch(() => null)
@@ -310,6 +372,13 @@ window.__ModuleLoader__.load({
       }, [order, discovered, state])
 
       const platformInfo = (id) => discovered.find(d => d.provider === id) ?? null
+      const platformLabel = (id) => {
+        if (PROVIDER_LABEL[id]) return PROVIDER_LABEL[id]
+        const row = platformInfo(id)
+        if (row?.label) return row.label
+        const acc = (state?.accounts ?? []).find(a => a.provider === id)
+        return acc?.nickname ?? id
+      }
 
       // 「平台 → 模型清单」：优先用 /state 的 models[]（RPC 读到的真实清单），
       // 读不到时退回账号自带 models。
@@ -416,9 +485,10 @@ window.__ModuleLoader__.load({
                 const off = offPlatforms.includes(id)
                 return h('div', { key: id, className: `qt-item${off ? ' off' : ''}` },
                   h('span', { className: 'qt-dim qt-mono' }, String(i + 1).padStart(2, '0')),
-                  h('span', { style: { minWidth: 82 } }, PROVIDER_LABEL[id] ?? id),
+                  h('span', { style: { minWidth: 82 } }, platformLabel(id),
                   info ? h('span', { className: 'qt-dim' }, `${info.accounts} 账号 / ${info.models} 模型`) : h('span', { className: 'qt-dim' }, '未探测'),
                   info?.closed ? h('span', { className: 'qt-badge qt-warn' }, '全部模型关闭') : null,
+                  ),
                   h('span', { className: 'qt-grow' }),
                   h('button', { className: 'qt-btn', onClick: () => { setOrder(move(platformIds, i, -1)); setDirty(true) } }, '↑'),
                   h('button', { className: 'qt-btn', onClick: () => { setOrder(move(platformIds, i, 1)); setDirty(true) } }, '↓'),
@@ -465,7 +535,7 @@ window.__ModuleLoader__.load({
               onChange: (e) => setNewModel(e.target.value),
             },
               h('option', { value: '' }, '从已发现的模型里选一个…'),
-              platformsWithModels.map(pm => h('optgroup', { key: pm.provider, label: `${PROVIDER_LABEL[pm.provider] ?? pm.provider}（${pm.models.length}）` },
+              platformsWithModels.map(pm => h('optgroup', { key: pm.provider, label: `${platformLabel(pm.provider)}（${pm.models.length}）` },
                 pm.models.map(m => h('option', { key: m, value: m }, m)),
               )),
             ),
@@ -494,7 +564,7 @@ window.__ModuleLoader__.load({
               ? h('div', { className: 'qt-dim' }, '还没有模型清单 —— 先点「立即同步」。')
               : platformsWithModels.map(pm => h('div', { key: pm.provider },
                 h('div', { className: 'qt-dim', style: { marginBottom: 4 } },
-                  `${PROVIDER_LABEL[pm.provider] ?? pm.provider} · ${pm.models.length} 个`),
+                  `${platformLabel(pm.provider)} · ${pm.models.length} 个`),
                 h('div', { className: 'qt-row' },
                   pm.models.map(m => h('button', {
                     key: m,

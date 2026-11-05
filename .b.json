@@ -1,0 +1,103 @@
+{
+  "name": "main",
+  "commit": {
+    "sha": "5d380b2656443a1ff2ce03b84641d217f124b067",
+    "node_id": "C_kwDOVkF0n9oAKDVkMzgwYjI2NTY0NDNhMWZmMmNlMDNiODQ2NDFkMjE3ZjEyNGIwNjc",
+    "commit": {
+      "author": {
+        "name": "puppy-bai",
+        "email": "puppy-bai@users.noreply.github.com",
+        "date": "2026-11-05T14:15:22Z"
+      },
+      "committer": {
+        "name": "puppy-bai",
+        "email": "puppy-bai@users.noreply.github.com",
+        "date": "2026-11-05T14:15:22Z"
+      },
+      "message": "docs: 安装说明、设计文档入仓，包内附 docs/",
+      "tree": {
+        "sha": "380bd023a84c92c706bb68736bef649b057d4e10",
+        "url": "https://api.github.com/repos/puppy-bai/dsh-quota-takeover/git/trees/380bd023a84c92c706bb68736bef649b057d4e10"
+      },
+      "url": "https://api.github.com/repos/puppy-bai/dsh-quota-takeover/git/commits/5d380b2656443a1ff2ce03b84641d217f124b067",
+      "comment_count": 0,
+      "verification": {
+        "verified": false,
+        "reason": "unsigned",
+        "signature": null,
+        "payload": null,
+        "verified_at": null
+      }
+    },
+    "url": "https://api.github.com/repos/puppy-bai/dsh-quota-takeover/commits/5d380b2656443a1ff2ce03b84641d217f124b067",
+    "html_url": "https://github.com/puppy-bai/dsh-quota-takeover/commit/5d380b2656443a1ff2ce03b84641d217f124b067",
+    "comments_url": "https://api.github.com/repos/puppy-bai/dsh-quota-takeover/commits/5d380b2656443a1ff2ce03b84641d217f124b067/comments",
+    "author": {
+      "login": "puppy-bai",
+      "id": 194830371,
+      "node_id": "U_kgDOC5zgIw",
+      "avatar_url": "https://avatars.githubusercontent.com/u/194830371?v=4",
+      "gravatar_id": "",
+      "url": "https://api.github.com/users/puppy-bai",
+      "html_url": "https://github.com/puppy-bai",
+      "followers_url": "https://api.github.com/users/puppy-bai/followers",
+      "following_url": "https://api.github.com/users/puppy-bai/following{/other_user}",
+      "gists_url": "https://api.github.com/users/puppy-bai/gists{/gist_id}",
+      "starred_url": "https://api.github.com/users/puppy-bai/starred{/owner}{/repo}",
+      "subscriptions_url": "https://api.github.com/users/puppy-bai/subscriptions",
+      "organizations_url": "https://api.github.com/users/puppy-bai/orgs",
+      "repos_url": "https://api.github.com/users/puppy-bai/repos",
+      "events_url": "https://api.github.com/users/puppy-bai/events{/privacy}",
+      "received_events_url": "https://api.github.com/users/puppy-bai/received_events",
+      "type": "User",
+      "user_view_type": "public",
+      "site_admin": false
+    },
+    "committer": {
+      "login": "puppy-bai",
+      "id": 194830371,
+      "node_id": "U_kgDOC5zgIw",
+      "avatar_url": "https://avatars.githubusercontent.com/u/194830371?v=4",
+      "gravatar_id": "",
+      "url": "https://api.github.com/users/puppy-bai",
+      "html_url": "https://github.com/puppy-bai",
+      "followers_url": "https://api.github.com/users/puppy-bai/followers",
+      "following_url": "https://api.github.com/users/puppy-bai/following{/other_user}",
+      "gists_url": "https://api.github.com/users/puppy-bai/gists{/gist_id}",
+      "starred_url": "https://api.github.com/users/puppy-bai/starred{/owner}{/repo}",
+      "subscriptions_url": "https://api.github.com/users/puppy-bai/subscriptions",
+      "organizations_url": "https://api.github.com/users/puppy-bai/orgs",
+      "repos_url": "https://api.github.com/users/puppy-bai/repos",
+      "events_url": "https://api.github.com/users/puppy-bai/events{/privacy}",
+      "received_events_url": "https://api.github.com/users/puppy-bai/received_events",
+      "type": "User",
+      "user_view_type": "public",
+      "site_admin": false
+    },
+    "parents": [
+      {
+        "sha": "e5ffc52e3befc134a96a9290b74e5e2cfd1654fb",
+        "url": "https://api.github.com/repos/puppy-bai/dsh-quota-takeover/commits/e5ffc52e3befc134a96a9290b74e5e2cfd1654fb",
+        "html_url": "https://github.com/puppy-bai/dsh-quota-takeover/commit/e5ffc52e3befc134a96a9290b74e5e2cfd1654fb"
+      }
+    ]
+  },
+  "_links": {
+    "self": "https://api.github.com/repos/puppy-bai/dsh-quota-takeover/branches/main",
+    "html": "https://github.com/puppy-bai/dsh-quota-takeover/tree/main"
+  },
+  "protected": false,
+  "protection": {
+    "enabled": false,
+    "required_status_checks": {
+      "enforcement_level": "off",
+      "contexts": [
+
+      ],
+      "checks": [
+
+      ]
+    }
+  },
+  "protection_url": "https://api.github.com/repos/puppy-bai/dsh-quota-takeover/branches/main/protection"
+}

@@ -328,7 +328,10 @@ export function resolveViaAliases(aliases = [], models = []) {
     if (inList.includes(al)) return al
     // 规范化：去 -free / -preview / eac: 前缀，小写
     const norm = normalizeModel(al)
+    // 聚合渠道的模型 id 形如 `siliconflow/deepseek-ai/DeepSeek-V3`：
+    // 先按整串比，再按最后一段比，这样别名 `DeepSeek-V3` 也能命中。
     const hit = inList.find((m) => normalizeModel(m) === norm)
+      ?? inList.find((m) => normalizeModel(String(m).split('/').pop()) === norm)
     if (hit) return hit
   }
   return null
