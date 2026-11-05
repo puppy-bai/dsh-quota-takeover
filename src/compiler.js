@@ -55,6 +55,8 @@ export function createCompiler({ logger, cfg, ofm, bridge, bench, stores, journa
       const plan = {
         at: Date.now(),
         reason,
+        // 交给 /state 展示用：让「catalog 里自动发现的通道」(magpie 等) 也出现在平台表里
+        accounts: acct.map((a) => ({ id: a.id, provider: a.provider, nickname: a.nickname, enabled: a.enabled !== false, kind: a.kind ?? 'account', models: a.models })),
         chain,
         excluded,
         warnings,
@@ -353,15 +355,32 @@ export function enrichAccounts(accounts, catalogModels) {
     if (typeof id !== 'string') continue
     const hit = /^subscription:([^/]+)\/(.+)$/.exec(id)
     if (!hit) continue
-    const [, accountId, model] = hit
+    const [, accountId] = hit
     const arr = byAccount.get(accountId) ?? []
-    arr.push(model)
+    // 存**完整**的 catalog id（combos 只认原样 id）；别名匹配靠最后一段兜底。
+    arr.push(id)
     byAccount.set(accountId, arr)
   }
-  return (accounts ?? []).map((a) => {
+  const list = (accounts ?? []).map((a) => {
     const own = Array.isArray(a.models) && a.models.length ? a.models : (byAccount.get(a.id) ?? [])
     return { ...a, models: own }
   })
+  // catalog 里出现、但账号池里没有的通道（例如 magpie 引擎自己的
+  // `subscription:magpie/siliconflow/…`）也当成一个平台：这样用户新接的
+  // 聚合渠道（硅基流动等）不用改插件就能出现在顺序表里。
+  const known = new Set(list.map((a) => a.id))
+  for (const [accountId, models] of byAccount) {
+    if (known.has(accountId)) continue
+    list.push({
+      id: accountId,
+      provider: accountId,
+      nickname: accountId === 'magpie' ? 'Magpie（硅基流动等）' : accountId,
+      enabled: true,
+      models,
+      kind: 'lane',
+    })
+  }
+  return list
 }
 
 /** 本地 catalog.json 的模型 id 列表（无账号前缀的那种，用于降级路径）。 */

@@ -129,30 +129,50 @@ window.__ModuleLoader__.load({
       const out = { accounts: [], models: [], platforms: [] }
       let payload = null
       try { payload = await json(`${OFM}/providers`) } catch { return out }
-      const configured = payload?.configured ?? {}
+      const section = payload?.configured ?? {}
+      const configured = section?.providers ?? {}
       const registry = payload?.registry
       const regRows = Array.isArray(registry) ? registry : Object.values(registry ?? {})
       const label = new Map()
-      for (const row of regRows) if (row?.id) label.set(row.id, row.name ?? row.id)
-      const owned = new Set()
-      for (const pid of Object.keys(configured ?? {})) {
+      const registryModels = new Map()
+      for (const row of regRows) {
+        if (!row?.id) continue
+        label.set(row.id, row.name ?? row.id)
+        const ids = (Array.isArray(row.models) ? row.models : []).map((m) => m?.id).filter(Boolean)
+        registryModels.set(row.id, ids)
+      }
+
+      // catalog 里 channel==='aggregate' 的行才是聚合渠道；
+      // 按 id 的第一段（providerId）分组，这样模型 id 自带斜杠也不会分错。
+      const byProvider = new Map()
+      for (const m of Array.isArray(catalog) ? catalog : []) {
+        if (m?.channel !== 'aggregate' || typeof m.id !== 'string') continue
+        const pid = m.id.slice(0, m.id.indexOf('/'))
         if (!pid) continue
-        const cfg = configured[pid] ?? {}
-        const prefix = `${pid}/`
-        const rows = (Array.isArray(catalog) ? catalog : [])
-          .filter((m) => typeof m?.id === 'string' && m.id.startsWith(prefix))
-        for (const m of rows) {
-          if (owned.has(m.id)) continue
-          owned.add(m.id)
-          out.models.push({ id: m.id, provider: pid, name: m.name ?? m.id })
-        }
-        // 模型清单还没探到时不要合成账号，否则每个档都会变成 unverified 候选
+        const arr = byProvider.get(pid) ?? []
+        arr.push(m)
+        byProvider.set(pid, arr)
+      }
+      // 没进 catalog 的已配置平台：先用 registry 的静态模型表兜底，
+      // 这样「刚接入、还没探测完」的平台也能立刻出现在顺序表里。
+      for (const [pid, cfg] of Object.entries(configured)) {
+        if (!pid || byProvider.has(pid)) continue
+        if (cfg?.enabled === false) continue
+        const ids = registryModels.get(pid) ?? []
+        byProvider.set(pid, ids.map((mid) => ({ id: `${pid}/${mid}`, name: mid, channel: 'aggregate' })))
+      }
+
+      for (const [pid, rows] of byProvider) {
+        const cfg = configured[pid] ?? null
+        const enabled = section?.enabled !== false && cfg?.enabled !== false
+        for (const m of rows) out.models.push({ id: m.id, provider: pid, name: m.name ?? m.id })
+        // 没有模型清单时不要合成账号：否则每个档都会变成 unverified 候选。
         if (rows.length > 0) {
           out.accounts.push({
             id: `aggregate:${pid}`,
             provider: pid,
             nickname: label.get(pid) ?? pid,
-            enabled: cfg?.enabled !== false,
+            enabled,
             models: rows.map((m) => m.id),
             kind: 'aggregate',
           })
@@ -160,12 +180,27 @@ window.__ModuleLoader__.load({
         out.platforms.push({
           provider: pid,
           label: label.get(pid) ?? pid,
-          accounts: 1,
+          accounts: rows.length > 0 ? 1 : 0,
           models: rows.length,
-          enabled: cfg?.enabled === false ? 0 : 1,
+          enabled: enabled ? 1 : 0,
           closed: false,
           kind: 'aggregate',
         })
+      }
+      return out
+    }
+
+    /** 合并两个模型表（按 id 去重），保留 catalog 里的通道前缀行（如 subscription:magpie/…）。 */
+    function mergeModels(...lists) {
+      const seen = new Set()
+      const out = []
+      for (const list of lists) {
+        for (const row of Array.isArray(list) ? list : []) {
+          const id = typeof row === 'string' ? row : row?.id
+          if (!id || seen.has(id)) continue
+          seen.add(id)
+          out.push(typeof row === 'string' ? { id } : row)
+        }
       }
       return out
     }
@@ -228,7 +263,7 @@ window.__ModuleLoader__.load({
         await json(`${QT}/snapshot`, {
           method: 'POST',
           headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ combos, accounts, models: grid.models.length ? grid.models : catalog, platforms: grid.platforms, source: 'browser' }),
+          body: JSON.stringify({ combos, accounts, models: mergeModels(grid.models, catalog), platforms: grid.platforms, source: 'browser' }),
         })
         step('snapshot', 'ok')
 

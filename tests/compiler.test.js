@@ -229,3 +229,28 @@ test('聚合渠道：别名按最后一段匹配（siliconflow/deepseek-ai/DeepS
   const plan = compiler.buildChain(cfg, accounts, {})
   assert.deepEqual(plan.chain.map((c) => c.resolved), ['siliconflow/deepseek-ai/DeepSeek-V3'])
 })
+
+test('新接入通道自动出现：catalog 里的 subscription:magpie/* 会变成平台，别名按最后一段命中', async () => {
+  const { enrichAccounts } = await import('../src/compiler.js')
+  const catalog = [
+    { id: 'subscription:magpie/siliconflow/deepseek-ai/DeepSeek-V4.1-Flash', name: 'V4.1 Flash' },
+    { id: 'free-model-a', name: 'free' },
+  ]
+  const accounts = enrichAccounts([], catalog)
+  assert.equal(accounts.length, 1)
+  assert.equal(accounts[0].provider, 'magpie')
+
+  const base = makeCfg()
+  const cfg = mergeConfig(base, {
+    modelTiers: [{ id: 'flash', label: 'Flash', pinned: false, aliases: ['DeepSeek-V4.1-Flash'] }],
+    finalResort: { official: { enabled: false }, fallbackModels: [] },
+  })
+  const compiler = createCompiler({
+    logger: { warn() {} }, cfg: () => cfg, ofm: {}, bridge: null,
+    bench: { get: () => ({}), edit: () => ({}), update() {} },
+    stores: { plan: { update() {}, get: () => ({}) } }, journal() {},
+  })
+  const plan = compiler.buildChain(cfg, accounts, {})
+  assert.deepEqual(plan.chain.map((c) => c.resolved),
+    ['subscription:magpie/siliconflow/deepseek-ai/DeepSeek-V4.1-Flash'])
+})

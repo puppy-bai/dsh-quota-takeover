@@ -3,3 +3,9 @@ node_modules/
 *.log
 .DS_Store
 quota-takeover-pack/
+
+# 临时调试产物
+.b.json
+.*.json
+!package.json
+!package-lock.json

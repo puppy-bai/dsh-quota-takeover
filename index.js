@@ -300,10 +300,15 @@ function makeApiHandler(opts) {
       // 设置页要拿「平台 × 模型」网格来渲染排序界面：直接回中继里最新的快照
       if (method === 'GET' && rp === '/state') {
         const snap = bridge.current() ?? {}
+        // 快照里的账号（浏览器读到的）∪ 上一轮编译用的账号（含 host 自动发现的通道，
+        // 例如 magpie 里的硅基流动）—— 后者在页面里也要能排序。
+        const planned = planStore.get()?.accounts ?? []
+        const seen = new Set((snap.accounts ?? []).map((a) => a.id))
+        const accounts = [...(snap.accounts ?? []), ...planned.filter((a) => !seen.has(a.id))]
         return send(200, {
           at: snap.at ?? 0,
           source: snap.source ?? null,
-          accounts: snap.accounts ?? [],
+          accounts,
           models: snap.models ?? [],
           platforms: snap.platforms ?? [],
           combos: snap.combos ?? [],
