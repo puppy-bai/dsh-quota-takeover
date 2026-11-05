@@ -1,0 +1,73 @@
+{
+  "name": "dsh-quota-takeover",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "额度接力：Our Free Model 之上的自动接力层 —— 平台额度耗尽时按你设定的顺序换平台、换模型档，全平台都不可用时回落到官方额度或你指定的兜底模型；因额度/限流中断的回合会自动向会话补一条「继续」，任务不中断。",
+  "main": "./index.js",
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./package.json": "./package.json",
+    "./locale/*.json": "./locale/*.json"
+  },
+  "scripts": {
+    "test": "node --test tests/*.test.js",
+    "smoke": "node probes/smoke-host.mjs",
+    "netcheck": "node probes/netcheck.mjs",
+    "plan": "node probes/plan-preview.mjs"
+  },
+  "files": [
+    "index.js",
+    "client.js",
+    "src/",
+    "probes/",
+    "tests/",
+    "cordis.patch.yml",
+    "locale/",
+    "LICENSE"
+  ],
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "deepseek-harness",
+    "quota",
+    "failover",
+    "resume"
+  ],
+  "engines": {
+    "node": "^22.19.0 || >=24.0.0",
+    "dsh": ">=0.2.1-rc.1 <0.3.0-0"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": []
+    }
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/puppy-bai/dsh-quota-takeover.git"
+  },
+  "homepage": "https://github.com/puppy-bai/dsh-quota-takeover#readme",
+  "bugs": {
+    "url": "https://github.com/puppy-bai/dsh-quota-takeover/issues"
+  },
+  "license": "MIT",
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "^4.0.4",
+    "@deepseek-ai/dsh-llm": "^0.2.1-rc.1",
+    "react": "^18.3.1"
+  },
+  "peerDependenciesMeta": {
+    "@deepseek-ai/dsh-llm": {
+      "optional": true
+    },
+    "react": {
+      "optional": true
+    }
+  }
+}

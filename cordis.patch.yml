@@ -1,0 +1,8 @@
+# dsh-quota-takeover bundle patch.
+#
+# 一行 insert 挂载 Host 半身；浏览器半身由 package.json 的 dsh.client 声明。
+# 单独 id 命名空间，避免与 OFM / 其它 bundle 冲突。
+- insert:
+    - id: quota-takeover
+      name: 'dsh-quota-takeover'
+      config: {}
