@@ -19,6 +19,10 @@ export const DEFAULT_CONFIG = Object.freeze({
     excludeAccounts: [],      // 账号 id 通配排除
     excludePlatforms: [],     // 平台（provider id）整体排除
     perPlatformAccountOrder: {}, // 同平台多账号顺序（可选）
+    hiddenPlatforms: [],      // 用户手动删掉的平台：不再出现在顺序表，也不参与编译
+    pruneMissing: true,       // 读不到的平台：true=自动从顺序里清掉
+    pruneZeroAccounts: true,  // 0 账号的空渠道：自动从顺序里隐藏（有账号后会自动放回来）
+    pruneAfterMisses: 3,      // 连续缺席几次才清（防止一次探测失败就误删）
   },
 
   // 模型阶梯：钉住（第一档） + 后续档
@@ -124,7 +128,8 @@ export function readConfig(dataDir, fallback = DEFAULT_CONFIG) {
 export function saveConfig(dataDir, patch) {
   const file = configFile(dataDir)
   const current = readConfig(dataDir, {})
-  atomicWrite(file, { ...current, ...patch })
+  // 深合并：只写 platformOrder 时不能把 platformPolicy 的其它开关冲掉
+  atomicWrite(file, mergeConfig(current, patch ?? {}))
 }
 
 /** 深层合并已知嵌套对象；标量直接覆盖；数组整体替换。 */

@@ -18,6 +18,10 @@
 | 全都换完还没有 → 换模型再遍历一遍 | 遍历形状 `tier-major`（档优先）：先全平台找第 1 档，再全平台找第 2 档…… |
 | 最后兜底 | `finalResort.fallbackModels`（如 `groq/llama-3.3-70b`）非空 → 编译兜底链；为空 → 进入「等待恢复」 |
 | 因额度中断 → 自动换平台并续跑 | 监听 `llm/stream` 的错误终点，分类为额度/限流后写冷却、重编译计划、向该会话 `agent.followup(一条「继续」消息)` |
+| 新接入的平台自动出现 | 平台表有三处来源：channel-pack 账号池、OFM 聚合渠道 `/providers`、catalog 里的新通道（如 `subscription:magpie/siliconflow/…` → 「Magpie（硅基流动等）」）；每轮同步重新读 |
+| 撤掉的平台自动消失 | 连续 `platformPolicy.pruneAfterMisses`（默认 3）轮读不到就从顺序里清掉；关掉 `pruneMissing` 则只标记不删 |
+| 0 账号的空渠道自动消失 | `platformPolicy.pruneZeroAccounts`（默认开）：账号数为 0 的渠道直接隐藏；哪天给它加了账号，会自动放回来（只自愈「自动隐藏」的，用户手动删的保持删除） |
+| 手动删除任意平台 | 每行常驻红色「删除」；写进 `hiddenPlatforms` + `excludePlatforms`，底部「已隐藏 N 个」点 ↺ 可放回 |
 
 ## 两个半身（为什么必须这样）
 
@@ -49,7 +53,7 @@ DSH → Plugins → Discover 里搜 quota-takeover
 
 ```bash
 cd ~/.dsh/profiles/desktop
-npm i /path/to/dsh-quota-takeover-0.1.0.tgz   # 或把源码目录拷到 node_modules/dsh-quota-takeover
+npm i /path/to/dsh-quota-takeover-0.1.1.tgz   # 或把源码目录拷到 node_modules/dsh-quota-takeover
 
 # 然后在 package.json 的 dsh.profile.bundles 数组里追加 "dsh-quota-takeover"
 # 被 bundles 引用的包，其自带 cordis.patch.yml 自动生效；
@@ -66,7 +70,7 @@ npm i /path/to/dsh-quota-takeover-0.1.0.tgz   # 或把源码目录拷到 node_mo
 | 平台顺序 / 模型档 | 列出 channel-pack 里启用的平台与它们的真实模型 |
 | `~/.dsh/quota-takeover/journal.jsonl` | 有 `api-mounted`；发生过失败时有 `failure` / `resume` |
 
-运行期数据：`~/.dsh/quota-takeover/{config,plan,bench,resume}.json` + `journal.jsonl`
+运行期数据：`~/.dsh/quota-takeover/{config,plan,bench,resume,platforms}.json` + `journal.jsonl`
 
 ## 配置
 
@@ -76,6 +80,13 @@ npm i /path/to/dsh-quota-takeover-0.1.0.tgz   # 或把源码目录拷到 node_mo
 {
   "enabled": true,
   "platformOrder": ["trae", "minimax", "zcode", "loomy", "raccoon", "gemini"],
+  "platformPolicy": {
+    "unknownTail": true,
+    "excludePlatforms": [],
+    "pruneMissing": true,        // 读不到的渠道自动从顺序里清掉
+    "pruneAfterMisses": 3,       // 连续缺席几轮才清（防一次探测失败误删）
+    "pruneZeroAccounts": true    // 0 账号的空渠道自动隐藏（有账号后自动回来）
+  },
   "modelTiers": [
     { "id": "deepseek-flash", "label": "DeepSeek V4.1 Flash", "pinned": true,
       "aliases": ["deepseek-v4.1-flash", "deepseek-v4-flash-0731", "deepseek-flash"] },
@@ -88,7 +99,11 @@ npm i /path/to/dsh-quota-takeover-0.1.0.tgz   # 或把源码目录拷到 node_mo
 ```
 
 - **`platformOrder`**：没列出的平台排在后面（`platformPolicy.unknownTail`）。
-- **`modelTiers`**：`aliases` 是同一模型在各平台的叫法；匹配时先精确、再去 `-free`/`-preview`/`eac:` 前缀小写比较。
+- **`platformPolicy.pruneMissing` / `pruneAfterMisses`**：撤掉的渠道会一直留在顺序里，所以连续
+  若干轮读不到就自动清理（写入 `platforms.json` 记录缺席次数）。**一轮读不到任何平台时整轮跳过**，
+  因为那说明中继断了、不是渠道被删了。
+- **`modelTiers`**：`aliases` 是同一模型在各平台的叫法；匹配时先精确、再去 `-free`/`-preview`/`eac:` 前缀小写比较，
+  最后还能按 id 的最后一段比（聚合渠道的 `siliconflow/deepseek-ai/DeepSeek-V3` 能被 `DeepSeek-V3` 命中）。
 - **`optimisticOnUnknown`**：平台模型清单未知时（本地 `state.json` 不存模型表）先把格子放进链，
   真没有会让 OFM 的 combo 自然失败并前进——**未知 ≠ 不存在**。
 - **`resume.requireCandidateChange`**：核心防呆，候选没变就不重复注入「继续」。

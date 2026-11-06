@@ -315,6 +315,8 @@ window.__ModuleLoader__.load({
 .qt-btn:disabled{opacity:.45;cursor:default}
 .qt-item{display:flex;gap:8px;align-items:center;padding:3px 6px;border-radius:6px;background:var(--hover-bg,#8881)}
 .qt-item.off{opacity:.45}
+.qt-item.qt-stale{background:transparent;border:1px dashed var(--border-color,#3336)}
+.qt-btn.qt-danger{color:#f85149;border-color:#f8514966}
 .qt-grow{flex:1}
 .qt-alias{flex:1;min-width:150px;background:transparent;color:inherit;border:1px solid var(--border-color,#3334);border-radius:6px;padding:2px 6px;font-size:12px}
 .qt-select{max-width:320px;background:transparent;color:inherit;border:1px solid var(--border-color,#3334);border-radius:6px;padding:2px 6px;font-size:12px}
@@ -341,11 +343,14 @@ window.__ModuleLoader__.load({
       const [order, setOrder] = useState([])
       const [tiers, setTiers] = useState([])
       const [offPlatforms, setOff] = useState([])
+      const [hidden, setHidden] = useState([])
       const [rhythm, setRhythm] = useState({})
       const [dirty, setDirty] = useState(false)
       const timer = useRef(0)
       const alive = useRef(true)
       const transportRef = useRef(null)
+      // 自动隐藏「0 账号」渠道时记一笔：避免同一轮反复 POST，也避免用户点 ↺ 放回后又被立刻藏起来
+      const zeroHiddenRef = useRef(new Set())
 
       const report = useCallback((entry) => {
         if (!alive.current) return
@@ -363,6 +368,7 @@ window.__ModuleLoader__.load({
             setOrder(Array.isArray(cfg.platformOrder) ? cfg.platformOrder : [])
             setTiers(Array.isArray(cfg.modelTiers) ? cfg.modelTiers : [])
             setOff(Array.isArray(cfg?.platformPolicy?.excludePlatforms) ? cfg.platformPolicy.excludePlatforms : [])
+            setHidden(Array.isArray(cfg?.platformPolicy?.hiddenPlatforms) ? cfg.platformPolicy.hiddenPlatforms : [])
             setRhythm({
               quotaMs: Math.round((cfg?.cooldown?.quotaMs ?? 120000) / 60000),
               rateLimitMs: Math.round((cfg?.cooldown?.rateLimitMs ?? 60000) / 1000),
@@ -376,6 +382,9 @@ window.__ModuleLoader__.load({
               officialProvider: cfg?.finalResort?.official?.provider ?? 'deepseek-account',
               officialModels: (cfg?.finalResort?.official?.models ?? ['deepseek-flash']).join(', '),
               fallbackModels: (cfg?.finalResort?.fallbackModels ?? []).join(', '),
+              autoPrune: cfg?.platformPolicy?.pruneMissing !== false,
+              pruneAfter: cfg?.platformPolicy?.pruneAfterMisses ?? 3,
+              autoHideZero: cfg?.platformPolicy?.pruneZeroAccounts !== false,
             })
           }
         } catch { if (alive.current) setHostOk(false) }
@@ -403,10 +412,55 @@ window.__ModuleLoader__.load({
         const seen = new Set([...order, ...discovered.map(p => p.provider)])
         for (const a of state?.accounts ?? []) seen.add(a.provider)
         for (const p of PROVIDERS) if (discovered.some(d => d.provider === p)) seen.add(p)
+        for (const id of hidden) seen.delete(id)
         return [...seen]
-      }, [order, discovered, state])
+      }, [order, discovered, state, hidden])
 
-      const platformInfo = (id) => discovered.find(d => d.provider === id) ?? null
+      // 「恢复」：把删掉的平台从 hiddenPlatforms 里放出来
+      const restore = useCallback(async (id) => {
+        setHidden(v => v.filter(x => x !== id))
+        setOff(v => v.filter(x => x !== id))
+        zeroHiddenRef.current.add(id)   // 用户明确要它，别再自动藏
+        try {
+          const s = await json(`${QT}/status`)
+          const cfg = s?.config ?? {}
+          await json(`${QT}/config`, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({
+              platformPolicy: {
+                ...(cfg?.platformPolicy ?? {}),
+                hiddenPlatforms: (cfg?.platformPolicy?.hiddenPlatforms ?? []).filter(x => x !== id),
+                excludePlatforms: (cfg?.platformPolicy?.excludePlatforms ?? []).filter(x => x !== id),
+              },
+            }),
+          })
+          report({ step: 'restore', state: `已恢复平台 ${id}` })
+        } catch (error) {
+          report({ step: 'restore', state: String(error?.message ?? error).slice(0, 90) })
+        }
+        void refresh()
+      }, [refresh, report])
+
+      const platformInfo = (id) => {
+        const row = discovered.find(d => d.provider === id)
+        if (row) return row
+        // 不在 channel-pack 平台表里、但账号表里有（例：host 从 catalog 自动发现的
+        // 「Magpie（硅基流动等）」）——用账号数据现算一份，别显示「未探测」。
+        const mine = (state?.accounts ?? []).filter(a => a.provider === id)
+        if (mine.length === 0) return null
+        const modelSet = new Set()
+        for (const a of mine) for (const m of a.models ?? []) modelSet.add(typeof m === 'string' ? m : m?.id)
+        return {
+          provider: id,
+          accounts: mine.length,
+          models: modelSet.size,
+          enabled: mine.filter(a => a.enabled !== false).length,
+          closed: false,
+          label: mine[0]?.nickname,
+          kind: mine[0]?.kind ?? 'account',
+        }
+      }
       const platformLabel = (id) => {
         if (PROVIDER_LABEL[id]) return PROVIDER_LABEL[id]
         const row = platformInfo(id)
@@ -414,6 +468,124 @@ window.__ModuleLoader__.load({
         const acc = (state?.accounts ?? []).find(a => a.provider === id)
         return acc?.nickname ?? id
       }
+
+      // 「这轮真的读到了」的平台：平台表 ∪ 账号表。不在里面的就是已失效（撤掉的渠道）。
+      const observedSet = useMemo(() => {
+        const set = new Set()
+        for (const p of discovered) if (p?.provider) set.add(p.provider)
+        for (const a of state?.accounts ?? []) if (a?.provider) set.add(a.provider)
+        return set
+      }, [discovered, state])
+      const healthMap = state?.platformHealth ?? {}
+
+      /**
+       * 0 账号的空渠道：客户端侧先自动藏起来。
+       *
+       * 为什么放在浏览器半身做：host 侧的 prune 规则要重启才生效，而这里是
+       * 「读到了 platforms[] 就能判断」的事 —— 由页面直接下发一次 /config，
+       * 用户刷新即可，不必为了一个空渠道重启 harness。
+       * 同时写 excludePlatforms，旧版宿主的接力链也会立刻跳过它。
+       */
+      useEffect(() => {
+        if (rhythm.autoHideZero === false) return
+        // 反向：之前因为 0 账号被自动藏起来的，现在有账号了 → 放回来
+        const revived = hidden.filter((id) => {
+          if (zeroHiddenRef.current.has(id)) return false
+          const row = (state?.platforms ?? []).find(p => p?.provider === id)
+          const auto = healthMap[id]?.autoHidden === true
+          return auto && (Number(row?.accounts) || 0) > 0
+        })
+        if (revived.length > 0) {
+          for (const id of revived) zeroHiddenRef.current.add(id)
+          ;(async () => {
+            try {
+              const s = await json(`${QT}/status`)
+              const live = s?.config ?? {}
+              const pol = live?.platformPolicy ?? {}
+              await json(`${QT}/config`, {
+                method: 'POST',
+                headers: { 'content-type': 'application/json' },
+                body: JSON.stringify({
+                  platformPolicy: {
+                    ...pol,
+                    excludePlatforms: (pol.excludePlatforms ?? []).filter(x => !revived.includes(x)),
+                    hiddenPlatforms: (pol.hiddenPlatforms ?? []).filter(x => !revived.includes(x)),
+                  },
+                }),
+              })
+              report({ step: 'auto-restore', state: `已有账号，自动放回：${revived.join(', ')}` })
+            } catch (error) {
+              report({ step: 'auto-restore', state: String(error?.message ?? error).slice(0, 90) })
+            }
+            void refresh()
+          })()
+        }
+        const zeros = (state?.platforms ?? [])
+          .filter(p => p?.provider && (Number(p.accounts) || 0) === 0)
+          .filter(p => !hidden.includes(p.provider) && !zeroHiddenRef.current.has(p.provider))
+        if (zeros.length === 0) return
+        const ids = zeros.map(p => p.provider)
+        for (const id of ids) zeroHiddenRef.current.add(id)
+        ;(async () => {
+          try {
+            const s = await json(`${QT}/status`)
+            const live = s?.config ?? {}
+            const pol = live?.platformPolicy ?? {}
+            await json(`${QT}/config`, {
+              method: 'POST',
+              headers: { 'content-type': 'application/json' },
+              body: JSON.stringify({
+                platformOrder: (live.platformOrder ?? []).filter(x => !ids.includes(x)),
+                platformPolicy: {
+                  ...pol,
+                  excludePlatforms: [...new Set([...(pol.excludePlatforms ?? []), ...ids])],
+                  hiddenPlatforms: [...new Set([...(pol.hiddenPlatforms ?? []), ...ids])],
+                },
+              }),
+            })
+            report({ step: 'auto-hide', state: `0 账号，自动隐藏：${ids.join(', ')}` })
+          } catch (error) {
+            report({ step: 'auto-hide', state: String(error?.message ?? error).slice(0, 90) })
+          }
+          void refresh()
+        })()
+      }, [state, hidden, rhythm.autoHideZero, refresh, report])
+
+      /**
+       * 手动删除一个平台。
+       *
+       * 走的是通用的 `/config`（而不是 `/platforms/forget`），原因很实际：
+       * `/config` 在任何版本里都有，而新增端点只有重启后的宿主才有 —— 走它就不必
+       * 让用户为了删一个平台去重启一次 harness。
+       * 三处一起写：从顺序里去掉、写进 hiddenPlatforms（不再显示）、同时写进
+       * excludePlatforms（旧版宿主只认这个字段，接力链也会立刻停止用它）。
+       */
+      const forget = useCallback(async (id) => {
+        setOrder(v => v.filter(x => x !== id))
+        setOff(v => v.filter(x => x !== id))
+        setHidden(v => (v.includes(id) ? v : [...v, id]))
+        try {
+          const s = await json(`${QT}/status`)
+          const live = s?.config ?? {}
+          const pol = live?.platformPolicy ?? {}
+          await json(`${QT}/config`, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({
+              platformOrder: (live.platformOrder ?? []).filter(x => x !== id),
+              platformPolicy: {
+                ...pol,
+                excludePlatforms: [...new Set([...(pol.excludePlatforms ?? []), id])],
+                hiddenPlatforms: [...new Set([...(pol.hiddenPlatforms ?? []), id])],
+              },
+            }),
+          })
+          report({ step: 'forget', state: `已删除平台 ${id}（底部「已删除」可放回）` })
+        } catch (error) {
+          report({ step: 'forget', state: String(error?.message ?? error).slice(0, 90) })
+        }
+        void refresh()
+      }, [refresh, report])
 
       // 「平台 → 模型清单」：优先用 /state 的 models[]（RPC 读到的真实清单），
       // 读不到时退回账号自带 models。
@@ -459,7 +631,13 @@ window.__ModuleLoader__.load({
       const saveAll = () => save({
         platformOrder: order,
         modelTiers: tiers,
-        platformPolicy: { excludePlatforms: offPlatforms },
+        platformPolicy: {
+          excludePlatforms: offPlatforms,
+          hiddenPlatforms: hidden,
+          pruneMissing: rhythm.autoPrune !== false,
+          pruneZeroAccounts: rhythm.autoHideZero !== false,
+          pruneAfterMisses: Number(rhythm.pruneAfter) || 3,
+        },
         cooldown: { quotaMs: rhythm.quotaMs * 60000, rateLimitMs: rhythm.rateLimitMs * 1000, authMs: rhythm.authMs * 60000 },
         finalResort: {
           retryAfterMinutes: rhythm.retryAfterMinutes,
@@ -512,19 +690,59 @@ window.__ModuleLoader__.load({
         // 平台顺序
         h('div', { className: 'qt-card' },
           h('h4', null, '平台顺序（额度不够时按这个顺序往下找）'),
+          h('div', { className: 'qt-row', style: { marginBottom: 8 } },
+            h('label', { className: 'qt-dim' },
+              h('input', {
+                type: 'checkbox',
+                checked: rhythm.autoPrune !== false,
+                onChange: (e) => { setRhythm(r => ({ ...r, autoPrune: e.target.checked })); setDirty(true) },
+              }),
+              ' 自动删除读不到的渠道',
+            ),
+            h('span', { className: 'qt-dim' }, '连续缺席'),
+            h('input', {
+              className: 'qt-num', type: 'number', min: 1, max: 20,
+              value: rhythm.pruneAfter ?? 3,
+              onChange: (e) => { setRhythm(r => ({ ...r, pruneAfter: Number(e.target.value) })); setDirty(true) },
+            }),
+            h('span', { className: 'qt-dim' }, '次后清掉（默认 3，防止一次探测失败就误删）'),
+            h('span', { className: 'qt-grow' }),
+            h('span', { className: 'qt-dim' }, '也可以点每行的「删除」手动清'),
+          ),
+          h('div', { className: 'qt-row', style: { marginBottom: 8 } },
+            h('label', { className: 'qt-dim' },
+              h('input', {
+                type: 'checkbox',
+                checked: rhythm.autoHideZero !== false,
+                onChange: (e) => { setRhythm(r => ({ ...r, autoHideZero: e.target.checked })); setDirty(true) },
+              }),
+              ' 0 账号的空渠道自动隐藏',
+            ),
+            h('span', { className: 'qt-dim' }, '（比如账号全撤掉的 Qoder / Cline；给它加了账号后会自动放回来）'),
+          ),
           platformIds.length === 0
             ? h('div', { className: 'qt-dim' }, '还没读到平台 —— 检查 OFM 的渠道账号是否启用。')
             : h('div', { className: 'qt-chain' },
               platformIds.map((id, i) => {
                 const info = platformInfo(id)
                 const off = offPlatforms.includes(id)
-                return h('div', { key: id, className: `qt-item${off ? ' off' : ''}` },
+                const stale = !observedSet.has(id)
+                const miss = healthMap[id]?.missingSyncs ?? 0
+                return h('div', { key: id, className: `qt-item${off ? ' off' : ''}${stale ? ' qt-stale' : ''}` },
                   h('span', { className: 'qt-dim qt-mono' }, String(i + 1).padStart(2, '0')),
                   h('span', { style: { minWidth: 82 } }, platformLabel(id),
-                  info ? h('span', { className: 'qt-dim' }, `${info.accounts} 账号 / ${info.models} 模型`) : h('span', { className: 'qt-dim' }, '未探测'),
-                  info?.closed ? h('span', { className: 'qt-badge qt-warn' }, '全部模型关闭') : null,
+                  stale
+                    ? h('span', { className: 'qt-badge qt-warn' }, miss > 0 ? `已失效 · 连缺 ${miss} 次` : '本轮未读到')
+                    : (info ? h('span', { className: 'qt-dim' }, `${info.accounts} 账号 / ${info.models} 模型`) : h('span', { className: 'qt-dim' }, '未探测')),
+                  !stale && info?.closed ? h('span', { className: 'qt-badge qt-warn' }, '全部模型关闭') : null,
                   ),
                   h('span', { className: 'qt-grow' }),
+                  // 每行都有删除按钮（用户要求「我可以手动删除」）：不必等它变失效
+                  h('button', {
+                    className: 'qt-btn qt-danger',
+                    title: '从这个列表里删掉这个平台（同时清掉它的跳过标记与缺席记录）',
+                    onClick: () => { void forget(id) },
+                  }, '删除'),
                   h('button', { className: 'qt-btn', onClick: () => { setOrder(move(platformIds, i, -1)); setDirty(true) } }, '↑'),
                   h('button', { className: 'qt-btn', onClick: () => { setOrder(move(platformIds, i, 1)); setDirty(true) } }, '↓'),
                   h('button', {
@@ -533,6 +751,16 @@ window.__ModuleLoader__.load({
                   }, off ? '启用' : '跳过'),
                 )
               })),
+          (hidden ?? []).length > 0
+            ? h('div', { className: 'qt-row', style: { marginTop: 8 } },
+              h('span', { className: 'qt-dim' }, `已隐藏 ${hidden.length} 个：`),
+              ...hidden.map(id => h('button', {
+                key: id, className: 'qt-btn', title: '放回平台顺序',
+                onClick: () => { void restore(id) },
+              }, `${platformLabel(id)} ↺`)),
+              h('span', { className: 'qt-dim' }, '（隐藏的渠道不显示、也不参与接力；点 ↺ 可放回）'),
+            )
+            : null,
         ),
 
         // 模型档顺序
@@ -550,7 +778,7 @@ window.__ModuleLoader__.load({
                 value: (t.aliases ?? []).join(', '),
                 placeholder: '模型别名，逗号分隔',
                 onChange: (e) => {
-                  const aliases = e.target.value.split(/[,，、s]+/).map(x => x.trim()).filter(Boolean)
+                  const aliases = e.target.value.split(/[,，、\s]+/).map(x => x.trim()).filter(Boolean)
                   setTiers(tiers.map((x, k) => k === i ? { ...x, aliases } : x)); setDirty(true)
                 },
               }),

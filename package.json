@@ -1,6 +1,6 @@
 {
   "name": "dsh-quota-takeover",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "type": "module",
   "description": "额度接力：Our Free Model 之上的自动接力层 —— 平台额度耗尽时按你设定的顺序换平台、换模型档，全平台都不可用时回落到官方额度或你指定的兜底模型；因额度/限流中断的回合会自动向会话补一条「继续」，任务不中断。",
   "main": "./index.js",
@@ -25,7 +25,8 @@
     "cordis.patch.yml",
     "locale/",
     "LICENSE",
-    "docs/"
+    "docs/",
+    "CHANGELOG.md"
   ],
   "keywords": [
     "dsh",

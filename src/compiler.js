@@ -18,7 +18,7 @@ import os from 'node:os'
 import fs from 'node:fs'
 import path from 'node:path'
 
-export function createCompiler({ logger, cfg, ofm, bridge, bench, stores, journal, onReplan }) {
+export function createCompiler({ logger, cfg, ofm, bridge, bench, stores, journal, onReplan, saveCfg }) {
   let busy = false
   let lastChangeSig = null
 
@@ -45,6 +45,12 @@ export function createCompiler({ logger, cfg, ofm, bridge, bench, stores, journa
 
       // 1) 读取 OFM 账号 + 额度（含按需刷新，受 per-hour 预算约束）
       const acct = await readAccounts(config)
+      // 1b) 平台健康度：读不到的、以及「0 账号」的平台 → 自动清理 / 标记失效
+      //     平台元数据（账号数）来自浏览器快照：channel-pack 里 0 账号的渠道不会出现在 accounts 里，
+      //     只有 platforms[] 那一行知道它是 0。
+      const platformMeta = bridge?.current?.()?.platforms ?? []
+      const prune = pruneMissingPlatforms(config, acct, stores.platforms, journal, platformMeta)
+      if (prune.changed) saveCfg?.({ platformOrder: config.platformOrder, platformPolicy: config.platformPolicy })
       // 2) 读本地冷却表
       const cooldownTable = bench.get() ?? {}
       // 3) 编排有序候选
@@ -64,6 +70,10 @@ export function createCompiler({ logger, cfg, ofm, bridge, bench, stores, journa
         waitUntil,
         candidateHash: hashChain(chain).slice(0, 16),
         writeBack: writeResult,
+        // 平台健康度：missing = 配置里有、这轮读不到（UI 显示「已失效」+ 删除按钮）
+        platformHealth: prune.health,
+        platformsMissing: prune.missing,
+        platformsPruned: prune.pruned,
       }
       stores.plan.update(plan)
 
@@ -119,11 +129,13 @@ export function createCompiler({ logger, cfg, ofm, bridge, bench, stores, journa
     const chain = []
     const now = Date.now()
 
-    // 未开启账号 / 被排除账号 / 被排除平台
+    // 未开启账号 / 被排除账号 / 被排除平台 / 用户手动删掉的平台
     const offPlatforms = new Set(config.platformPolicy?.excludePlatforms ?? [])
+    const hiddenPlatforms = new Set(config.platformPolicy?.hiddenPlatforms ?? [])
     const usable = accounts.filter((a) => a._skip !== 'disabled' && a.enabled !== false)
       .filter((a) => !matchExclude(a.id, config.platformPolicy.excludeAccounts))
       .filter((a) => !offPlatforms.has(a.provider))
+      .filter((a) => !hiddenPlatforms.has(a.provider))
 
     // 平台排序：显式顺序在前，未列出的按 unknownTail 决定
     const ordered = orderPlatforms(usable, config.platformOrder, config.platformPolicy.unknownTail)
@@ -381,6 +393,138 @@ export function enrichAccounts(accounts, catalogModels) {
     })
   }
   return list
+}
+
+/**
+ * 平台健康度 + 自动清理。
+ *
+ * 解决的问题：用户接了又撤掉的渠道、以及「0 账号」的空渠道，会永远留在顺序表里，
+ * 列表越来越长。三条规则（保守优先，避免一次探测失败就删光）：
+ *
+ *   1. 缺席：配置里有、本轮没读到 → missingSyncs +1；连续 >= pruneAfterMisses 轮 → 移除。
+ *   2. 0 账号：本轮读到了，但该平台账号数是 0 → 立刻隐藏（用户明确要求「0 账号的都自动删掉」）。
+ *   3. 自愈：被自动隐藏的平台后来又有账号了 → 自动放回来（只有 autoHidden 的会自愈，
+ *      用户手动删的保持删除状态）。
+ *
+ * 「隐藏」= 写进 platformPolicy.hiddenPlatforms 并从 platformOrder / excludePlatforms 移除；
+ * 同时写 excludePlatforms 让**旧版宿主**（只认 excludePlatforms）也立刻不再用它接力。
+ *
+ * 空观测保护：一轮连一个平台都没读到 = 数据源整个坏了（中继断线 / OFM 重启），
+ * 这时既不计数也不删，原样带回上一轮健康度。
+ *
+ * @param {object} config 运行时配置（会被就地修改）
+ * @param {Array} accounts 账号列表（含 provider）
+ * @param {{get?:Function, edit?:Function, update?:Function}} store platforms.json
+ * @param {Function} [journal]
+ * @param {Array} [platformMeta] 浏览器快照的 platforms[]（{provider, accounts, models}）
+ * @returns {{health: object, missing: Array, pruned: string[], hidden: string[], restored: string[], changed: boolean}}
+ */
+export function pruneMissingPlatforms(config, accounts, store, journal, platformMeta) {
+  const policy = config?.platformPolicy ?? {}
+  const prev = store?.get?.() ?? {}
+  const now = Date.now()
+  const health = {}
+  const pruned = []
+  const hiddenNow = []
+  const restored = []
+
+  // 每平台账号数：优先用快照里的 platforms[]（channel-pack 里 0 账号的渠道不会出现在
+  // accounts 里，只有那一行知道它是 0）；没有元数据时退回数账号。
+  const countByProvider = new Map()
+  for (const a of accounts ?? []) {
+    if (!a?.provider) continue
+    countByProvider.set(a.provider, (countByProvider.get(a.provider) ?? 0) + 1)
+  }
+  const metaCount = new Map()
+  for (const p of platformMeta ?? []) {
+    if (!p?.provider) continue
+    metaCount.set(p.provider, Number(p.accounts) || 0)
+  }
+  const accountsOf = (id) => (metaCount.has(id) ? Math.min(metaCount.get(id), countByProvider.get(id) ?? metaCount.get(id)) : (countByProvider.get(id) ?? 0))
+
+  const observed = new Set([...countByProvider.keys(), ...metaCount.keys()])
+
+  if (observed.size === 0) {
+    const keep = { ...(prev ?? {}) }
+    return {
+      health: keep,
+      missing: Object.entries(keep)
+        .filter(([, v]) => (Number(v?.missingSyncs) || 0) > 0)
+        .map(([id, v]) => ({ id, missingSyncs: v.missingSyncs, lastSeenAt: v.lastSeenAt ?? 0 })),
+      pruned: [], hidden: [], restored: [], changed: false, skipped: true,
+    }
+  }
+
+  const configured = new Set([
+    ...(config?.platformOrder ?? []),
+    ...(policy.excludePlatforms ?? []),
+    ...(policy.hiddenPlatforms ?? []),
+  ])
+
+  // ── 规则 1 / 2：缺席与 0 账号
+  for (const id of configured) {
+    const before = prev[id] ?? {}
+    if (!observed.has(id)) {
+      const missingSyncs = (Number(before.missingSyncs) || 0) + 1
+      health[id] = { lastSeenAt: Number(before.lastSeenAt) || 0, missingSyncs, accounts: 0, autoHidden: before.autoHidden === true }
+      if (policy.pruneMissing !== false && missingSyncs >= (Number(policy.pruneAfterMisses) || 3)) pruned.push(id)
+      continue
+    }
+    const n = accountsOf(id)
+    health[id] = { lastSeenAt: now, missingSyncs: 0, accounts: n, autoHidden: before.autoHidden === true }
+    if (n === 0 && policy.pruneZeroAccounts !== false) hiddenNow.push(id)
+  }
+  for (const id of observed) {
+    if (!health[id]) health[id] = { lastSeenAt: now, missingSyncs: 0, accounts: accountsOf(id), autoHidden: false }
+  }
+
+  // ── 规则 3：自愈（只有 autoHidden 的会回来）
+  const hiddenSet = new Set(policy.hiddenPlatforms ?? [])
+  for (const id of [...hiddenSet]) {
+    const row = health[id]
+    if (!row) continue
+    if (prev[id]?.autoHidden === true && row.accounts > 0 && row.missingSyncs === 0) {
+      hiddenSet.delete(id)
+      restored.push(id)
+      health[id] = { ...row, autoHidden: false }
+    }
+  }
+  for (const id of hiddenNow) {
+    hiddenSet.add(id)
+    health[id] = { ...health[id], autoHidden: true }
+  }
+  // 用户「手动删除」过的（旧版本没记 autoHidden 的那种）保持隐藏，不参与自愈
+
+  if (store?.edit) store.edit(() => health)
+  else store?.update?.(health)
+
+  const drop = new Set([...pruned, ...hiddenNow])
+  let changed = false
+  if (drop.size > 0) {
+    config.platformOrder = (config.platformOrder ?? []).filter((id) => !drop.has(id))
+    const excl = new Set(policy.excludePlatforms ?? [])
+    for (const id of drop) excl.add(id)
+    for (const id of restored) excl.delete(id)
+    config.platformPolicy = { ...policy, excludePlatforms: [...excl], hiddenPlatforms: [...hiddenSet] }
+    changed = true
+    if (pruned.length) journal?.({ kind: 'platform-prune', ids: pruned })
+    if (hiddenNow.length) journal?.({ kind: 'platform-hide-zero', ids: hiddenNow })
+    if (restored.length) journal?.({ kind: 'platform-restore', ids: restored })
+  } else if (restored.length > 0) {
+    const excl = new Set(policy.excludePlatforms ?? [])
+    for (const id of restored) excl.delete(id)
+    config.platformPolicy = { ...policy, excludePlatforms: [...excl], hiddenPlatforms: [...hiddenSet] }
+    changed = true
+    journal?.({ kind: 'platform-restore', ids: restored })
+  }
+
+  const missing = Object.entries(health)
+    .filter(([, v]) => (Number(v?.missingSyncs) || 0) > 0)
+    .map(([id, v]) => ({ id, missingSyncs: v.missingSyncs, lastSeenAt: v.lastSeenAt ?? 0 }))
+  const zeroAccounts = Object.entries(health)
+    .filter(([, v]) => v.missingSyncs === 0 && v.accounts === 0)
+    .map(([id]) => id)
+  return { health, missing, pruned, hidden: hiddenNow, restored, zeroAccounts, changed }
 }
 
 /** 本地 catalog.json 的模型 id 列表（无账号前缀的那种，用于降级路径）。 */

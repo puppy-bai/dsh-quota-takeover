@@ -254,3 +254,139 @@ test('新接入通道自动出现：catalog 里的 subscription:magpie/* 会变�
   assert.deepEqual(plan.chain.map((c) => c.resolved),
     ['subscription:magpie/siliconflow/deepseek-ai/DeepSeek-V4.1-Flash'])
 })
+
+test('平台自动清理：连续缺席到阈值才移除，未到阈值只标记；关掉开关只标记不删', async () => {
+  const { pruneMissingPlatforms } = await import('../src/compiler.js')
+  let stored = {}
+  const store = { get: () => stored, update: (value) => { stored = value } }
+  const events = []
+  const journal = (entry) => events.push(entry)
+  const accounts = [{ id: 'a1', provider: 'p1', enabled: true, models: ['m'] }]
+
+  const cfg = mergeConfig(makeCfg(), {
+    platformOrder: ['p1', 'gone'],
+    platformPolicy: { pruneMissing: true, pruneAfterMisses: 2, excludePlatforms: [] },
+  })
+
+  // 第 1 轮：只标记，不删
+  let result = pruneMissingPlatforms(cfg, accounts, store, journal)
+  assert.deepEqual(result.pruned, [])
+  assert.equal(result.missing.find((m) => m.id === 'gone')?.missingSyncs, 1)
+  assert.deepEqual(cfg.platformOrder, ['p1', 'gone'])
+
+  // 第 2 轮：达到阈值 → 从顺序里移除，并留一条 journal
+  result = pruneMissingPlatforms(cfg, accounts, store, journal)
+  assert.deepEqual(result.pruned, ['gone'])
+  assert.deepEqual(cfg.platformOrder, ['p1'])
+  assert.equal(events.filter((e) => e.kind === 'platform-prune').length, 1)
+
+  // 关掉开关：就算连缺 10 次也不删
+  const cfg2 = mergeConfig(makeCfg(), {
+    platformOrder: ['gone'],
+    platformPolicy: { pruneMissing: false, pruneAfterMisses: 1, excludePlatforms: [] },
+  })
+  const result2 = pruneMissingPlatforms(cfg2, accounts, { get: () => ({}), update() {} }, journal)
+  assert.deepEqual(result2.pruned, [])
+  assert.deepEqual(cfg2.platformOrder, ['gone'])
+  assert.equal(result2.missing[0].missingSyncs, 1)
+
+  // 回来的平台：missingSyncs 归零
+  const cfg3 = mergeConfig(makeCfg(), { platformOrder: ['p1'], platformPolicy: { pruneMissing: true, excludePlatforms: [] } })
+  const back = pruneMissingPlatforms(cfg3, accounts, { get: () => ({ p1: { missingSyncs: 5, lastSeenAt: 1 } }), update() {} }, journal)
+  assert.equal(back.missing.length, 0)
+})
+
+test('空观测保护：一轮读不到任何平台时不计数、不删除（中继断线不等于渠道被删）', async () => {
+  const { pruneMissingPlatforms } = await import('../src/compiler.js')
+  const store = { get: () => ({ gone: { missingSyncs: 2, lastSeenAt: 1 } }), update() {} }
+  const cfg = mergeConfig(makeCfg(), {
+    platformOrder: ['gone'],
+    platformPolicy: { pruneMissing: true, pruneAfterMisses: 3, excludePlatforms: [] },
+  })
+  const result = pruneMissingPlatforms(cfg, [], store, () => {})
+  assert.deepEqual(result.pruned, [], '空观测时绝不能删平台')
+  assert.deepEqual(cfg.platformOrder, ['gone'])
+  assert.equal(result.health.gone.missingSyncs, 2, '计数应保持不变')
+})
+
+test('手动删除：hiddenPlatforms 里的平台不参与接力（否则下一轮同步会把它捡回来）', async () => {
+  const accounts = [
+    { id: 'a1', provider: 'p1', enabled: true, models: ['m'] },
+    { id: 'a2', provider: 'p2', enabled: true, models: ['m'] },
+  ]
+  const base = mergeConfig(makeCfg(), {
+    modelTiers: [{ id: 't', label: 'T', pinned: false, aliases: ['m'] }],
+    platformOrder: ['p1', 'p2'],
+    platformPolicy: { excludePlatforms: [], hiddenPlatforms: ['p1'], unknownTail: true },
+    finalResort: { official: { enabled: false }, fallbackModels: [] },
+  })
+  const compiler = createCompiler({
+    logger: { warn() {} }, cfg: () => base, ofm: {}, bridge: null,
+    bench: { get: () => ({}), edit: () => ({}), update() {} },
+    stores: { plan: { update() {}, get: () => ({}) } }, journal() {},
+  })
+  const plan = compiler.buildChain(base, accounts, {})
+  assert.deepEqual(plan.chain.map((c) => c.platform), ['p2'], '被删掉的 p1 不应出现在链里')
+})
+
+test('0 账号的空渠道自动隐藏；给它加了账号后自动放回来（只自愈 autoHidden 的）', async () => {
+  const { pruneMissingPlatforms } = await import('../src/compiler.js')
+  let stored = {}
+  const store = { get: () => stored, edit: (fn) => { stored = fn(structuredClone(stored)) } }
+  const events = []
+  const journal = (e) => events.push(e)
+
+  const accounts = [{ id: 'a1', provider: 'trae', enabled: true, models: ['m'] }]
+  const meta = [
+    { provider: 'trae', accounts: 1, models: 25 },
+    { provider: 'qoder', accounts: 0, models: 17 },
+  ]
+  const cfg = mergeConfig(makeCfg(), {
+    platformOrder: ['trae', 'qoder'],
+    platformPolicy: { pruneMissing: true, pruneZeroAccounts: true, excludePlatforms: [], hiddenPlatforms: [] },
+  })
+
+  const first = pruneMissingPlatforms(cfg, accounts, store, journal, meta)
+  assert.deepEqual(first.hidden, ['qoder'], 'qoder 是 0 账号，应被自动隐藏')
+  assert.deepEqual(cfg.platformOrder, ['trae'])
+  assert.ok(cfg.platformPolicy.hiddenPlatforms.includes('qoder'))
+  assert.ok(cfg.platformPolicy.excludePlatforms.includes('qoder'), '旧宿主只认 excludePlatforms，也要写')
+  assert.equal(events.filter((e) => e.kind === 'platform-hide-zero').length, 1)
+
+  // 用户给 qoder 加了一个账号 → 下一轮应自动放回
+  const accounts2 = [...accounts, { id: 'q1', provider: 'qoder', enabled: true, models: ['m'] }]
+  const meta2 = [
+    { provider: 'trae', accounts: 1, models: 25 },
+    { provider: 'qoder', accounts: 1, models: 17 },
+  ]
+  const second = pruneMissingPlatforms(cfg, accounts2, store, journal, meta2)
+  assert.deepEqual(second.restored, ['qoder'])
+  assert.ok(!cfg.platformPolicy.hiddenPlatforms.includes('qoder'))
+  assert.ok(!cfg.platformPolicy.excludePlatforms.includes('qoder'))
+
+  // 用户手动删（没有 autoHidden 标记）的平台：即便有账号也保持隐藏
+  let stored2 = { manually: { lastSeenAt: 1, missingSyncs: 0, accounts: 3, autoHidden: false } }
+  const store2 = { get: () => stored2, edit: (fn) => { stored2 = fn(structuredClone(stored2)) } }
+  const cfg2 = mergeConfig(makeCfg(), {
+    platformOrder: ['manually'],
+    platformPolicy: { pruneMissing: true, pruneZeroAccounts: true, excludePlatforms: [], hiddenPlatforms: ['manually'] },
+  })
+  const third = pruneMissingPlatforms(cfg2, [{ id: 'x', provider: 'manually', enabled: true, models: ['m'] }], store2, journal,
+    [{ provider: 'manually', accounts: 3, models: 5 }])
+  assert.deepEqual(third.restored, [], '手动删的不自愈')
+  assert.ok(cfg2.platformPolicy.hiddenPlatforms.includes('manually'))
+})
+
+test('pruneZeroAccounts=false：0 账号只标记不隐藏', async () => {
+  const { pruneMissingPlatforms } = await import('../src/compiler.js')
+  let stored = {}
+  const store = { get: () => stored, edit: (fn) => { stored = fn(structuredClone(stored)) } }
+  const cfg = mergeConfig(makeCfg(), {
+    platformOrder: ['qoder'],
+    platformPolicy: { pruneMissing: true, pruneZeroAccounts: false, excludePlatforms: [], hiddenPlatforms: [] },
+  })
+  const result = pruneMissingPlatforms(cfg, [], store, () => {}, [{ provider: 'qoder', accounts: 0, models: 0 }])
+  assert.deepEqual(result.hidden, [])
+  assert.deepEqual(result.zeroAccounts, ['qoder'], '仍然报出「0 账号」给 UI')
+  assert.deepEqual(cfg.platformOrder, ['qoder'])
+})

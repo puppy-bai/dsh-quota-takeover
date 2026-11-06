@@ -103,5 +103,24 @@ const bridge = await call('GET', '/bridge')
 assert.equal(bridge.body.hasSnapshot, true)
 console.log('✔ GET /bridge →', JSON.stringify(bridge.body))
 
+// 手动删除平台：order / exclude 一起清掉，再读回来确认
+await call('POST', '/config', { platformOrder: ['p1', 'p2'], platformPolicy: { excludePlatforms: ['p2'] } })
+const forgot = await call('POST', '/platforms/forget', { id: 'p2' })
+assert.equal(forgot.status, 200)
+assert.deepEqual(forgot.body.platformOrder, ['p1'], 'p2 应从顺序里移除')
+const afterForget = await call('GET', '/status')
+assert.deepEqual(afterForget.body.config.platformOrder, ['p1'])
+assert.deepEqual(afterForget.body.config.platformPolicy.excludePlatforms, ['p2'],
+  '删除时也要写进 excludePlatforms —— 旧宿主只认这个字段，才能立刻生效')
+assert.deepEqual(afterForget.body.config.platformPolicy.hiddenPlatforms, ['p2'],
+  '删掉的平台要记住，否则下一轮同步会把它当新平台捡回来')
+console.log('✔ POST /platforms/forget →', JSON.stringify(forgot.body))
+
+// 缺失平台出现在 /state 的 platformsMissing 里（供 UI 显示「已失效 · 删除」）
+const stateRes = await call('GET', '/state')
+assert.ok(Array.isArray(stateRes.body.platformsMissing), 'platformsMissing 必须是数组')
+assert.ok('platformHealth' in stateRes.body, '要带 platformHealth')
+console.log('✔ GET /state → platformsMissing =', JSON.stringify(stateRes.body.platformsMissing))
+
 fs.rmSync(tmp, { recursive: true, force: true })
 console.log('\nsmoke-host: all good')

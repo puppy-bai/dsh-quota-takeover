@@ -78,6 +78,8 @@ export function apply(ctx, config = {}) {
   const bench = new JsonStore(path.join(dataDir, 'bench.json'), {})
   const planStore = new JsonStore(path.join(dataDir, 'plan.json'), {})
   const resumeStore = new JsonStore(path.join(dataDir, 'resume.json'), {})
+  // 平台健康度（连续缺席次数 / 最后可见时间）：自动清理已消失渠道的依据
+  const platformStore = new JsonStore(path.join(dataDir, 'platforms.json'), {})
   const journalStream = fs.createWriteStream(path.join(dataDir, 'journal.jsonl'), { flags: 'a' })
   // 目录被外部删除（清理/迁移）时不要炸掉整个插件
   journalStream.on('error', (error) => logger.warn?.(`${name}: journal write failed: ${error?.message ?? error}`))
@@ -100,9 +102,17 @@ export function apply(ctx, config = {}) {
     ofm,
     bridge,
     bench,
-    stores: { plan: planStore },
+    stores: { plan: planStore, platforms: platformStore },
     journal,
     onReplan,
+    // 自动清理平台时把新的 platformOrder / excludePlatforms 落盘
+    saveCfg: (patch) => {
+      try {
+        saveConfig(dataDir, patch)
+      } catch (error) {
+        logger.warn?.(`${name}: could not persist pruned platforms: ${error?.message ?? error}`)
+      }
+    },
   })
 
   // 出口自检：把「宿主进程到底能不能上网」写成一手证据（net.json + journal）。
@@ -191,7 +201,7 @@ export function apply(ctx, config = {}) {
         journal({ kind: 'api-mount-failed', detail: 'no server.register' })
         return
       }
-      const api = makeApiHandler({ compiler, cfg, bridge, ofm, bench, planStore, resumeStore, resume, journal, dataDir })
+      const api = makeApiHandler({ compiler, cfg, bridge, ofm, bench, planStore, resumeStore, resume, journal, dataDir, platformStore, logger })
       scoped.effect(() => {
         server.register({ kind: 'prefix', path: '/api/quota-takeover', handler: api })
         journal({ kind: 'api-mounted', path: '/api/quota-takeover' })
@@ -210,7 +220,7 @@ export function apply(ctx, config = {}) {
 
 /** 组装内部 HTTP handler（prefix handler 签名见 dsh-our-free-model/index.js:1725）。 */
 function makeApiHandler(opts) {
-  const { compiler, cfg, bridge, ofm, bench, planStore, resumeStore, resume, journal, dataDir } = opts
+  const { compiler, cfg, bridge, ofm, bench, planStore, resumeStore, resume, journal, dataDir, platformStore, logger } = opts
   return async function handler(req, res) {
     // ⚠ prefix handler 拿到的是**完整** req.url（OFM 自己做的是同一件事：
     // 在 url.pathname 里找 marker 再 slice 掉前缀）。早期版本误以为第三个参数
@@ -257,6 +267,30 @@ function makeApiHandler(opts) {
         bench.edit(() => null)
         bench.update({})
         return send(200, { ok: true })
+      }
+      // 手动删除一个平台：把它从顺序/排除/健康度表里一起清掉。
+      // 设置页的「删除」按钮走这里，比前端自己改数组再保存更不容易漏字段。
+      if (method === 'POST' && rp === '/platforms/forget') {
+        const body = await readJson(req)
+        const id = String(body?.id ?? '').trim()
+        if (!id) return send(400, { error: 'id required' })
+        cfg.platformOrder = (cfg.platformOrder ?? []).filter((x) => x !== id)
+        cfg.platformPolicy = {
+          ...(cfg.platformPolicy ?? {}),
+          // 同时写进 excludePlatforms：哪怕宿主是旧版（只认 exclude），接力链也立刻不再用它
+          excludePlatforms: [...new Set([...(cfg.platformPolicy?.excludePlatforms ?? []), id])],
+          // 记住「用户删过它」，否则下一轮同步它会作为「新发现的平台」又冒出来
+          hiddenPlatforms: [...new Set([...(cfg.platformPolicy?.hiddenPlatforms ?? []), id])],
+        }
+        platformStore.edit((current) => {
+          const next = { ...(current ?? {}) }
+          delete next[id]
+          return next
+        })
+        saveConfig(dataDir, { platformOrder: cfg.platformOrder, platformPolicy: cfg.platformPolicy })
+        journal({ kind: 'platform-forget', id })
+        await compiler.replan({ reason: 'forget', force: true }).catch(() => null)
+        return send(200, { ok: true, platformOrder: cfg.platformOrder })
       }
       // ── 浏览器中继三端点（见 design §12.2） ──────────────────────────
       if (method === 'POST' && rp === '/snapshot') {
@@ -305,6 +339,7 @@ function makeApiHandler(opts) {
         const planned = planStore.get()?.accounts ?? []
         const seen = new Set((snap.accounts ?? []).map((a) => a.id))
         const accounts = [...(snap.accounts ?? []), ...planned.filter((a) => !seen.has(a.id))]
+        const plan = planStore.get() ?? {}
         return send(200, {
           at: snap.at ?? 0,
           source: snap.source ?? null,
@@ -313,6 +348,10 @@ function makeApiHandler(opts) {
           platforms: snap.platforms ?? [],
           combos: snap.combos ?? [],
           bridge: bridge.status(),
+          // 配置里有、最近几轮读不到的平台（UI 显示「已失效」并提供删除按钮）
+          platformHealth: platformStore.get() ?? {},
+          platformsMissing: plan.platformsMissing ?? [],
+          platformsPruned: plan.platformsPruned ?? [],
         })
       }
       if (method === 'POST' && rp === '/refresh') {
